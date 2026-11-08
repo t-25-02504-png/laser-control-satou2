@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>レーザー加工データ管理 & 加工出力</title>
+  <style>
+    body { font-family: sans-serif; margin: 20px; background: #f4f6f8; color: #333; }
+    .card { background: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    h2 { margin-top: 0; color: #1a73e8; border-bottom: 2px solid #1a73e8; padding-bottom: 5px; }
+    label { display: block; margin-top: 10px; font-weight: bold; }
+    input, select, button { padding: 8px 12px; margin-top: 5px; border: 1px solid #ccc; border-radius: 4px; }
+    button { background: #1a73e8; color: white; border: none; cursor: pointer; font-size: 14px; }
+    button:hover { background: #1557b0; }
+    button:disabled { background: #ccc; cursor: not-allowed; }
+    .btn-connect { background: #34a853; }
+    .btn-connect:hover { background: #2d8e47; }
+    .btn-send { background: #ea4335; }
+    .btn-send:hover { background: #d93025; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+    th { background-color: #f2f2f2; }
+    #logConsole { background: #1e1e1e; color: #00ff00; padding: 10px; height: 120px; overflow-y: scroll; font-family: monospace; border-radius: 4px; font-size: 12px; }
+  </style>
+</head>
+<body>
+
+  <!-- 1. 生徒用提出フォーム -->
+  <div class="card">
+    <h2>📤 データ提出 (生徒用)</h2>
+    <form id="uploadForm">
+      <label>クラス:</label>
+      <input type="text" id="classGroup" required placeholder="例: 2A">
+      <label>出席番号:</label>
+      <input type="number" id="studentNum" required placeholder="例: 15">
+      <label>氏名:</label>
+      <input type="text" id="studentName" required placeholder="例: 山田太郎">
+      <label>サイズ (幅 x 高さ mm):</label>
+      <div style="display:flex; gap:10px;">
+        <input type="number" id="width" placeholder="幅(mm)" required>
+        <input type="number" id="height" placeholder="高さ(mm)" required>
+      </div>
+      <label>SVGファイル:</label>
+      <input type="file" id="svgFile" accept=".svg" required>
+      <br><br>
+      <button type="button" onclick="submitData()">送信する</button>
+    </form>
+  </div>
+
+  <!-- 2. 教員用 シリアル通信 ＆ レーザー加工制御 -->
+  <div class="card">
+    <h2>⚙️ レーザー加工制御 (教員専用 / USB接続)</h2>
+    
+    <div>
+      <strong>USBシリアル接続: </strong>
+      <button class="btn-connect" onclick="connectSerial()">Chromebookとレーザー機を接続</button>
+      <span id="serialStatus" style="margin-left: 10px; font-weight: bold; color: red;">未接続</span>
+    </div>
+
+    <hr style="margin: 15px 0;">
+
+    <button onclick="loadPendingList()">未加工リストを更新</button>
+    <table>
+      <thead>
+        <tr>
+          <th>クラス/番号/氏名</th>
+          <th>サイズ</th>
+          <th>ファイル名</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="pendingTableBody">
+        <tr><td colspan="4">リストを更新してください。</td></tr>
+      </tbody>
+    </table>
+
+    <h3>通信ログ</h3>
+    <div id="logConsole">レーザー加工機への接続を行ってください...<br></div>
+  </div>
+
+  <script>
+    // --- Web Serial 通信用変数 ---
+    let port = null;
+    let writer = null;
+
+    function log(msg) {
+      const consoleDiv = document.getElementById('logConsole');
+      consoleDiv.innerHTML += msg + '<br>';
+      consoleDiv.scrollTop = consoleDiv.scrollHeight;
+    }
+
+    // --- Web Serial 接続処理 ---
+    async function connectSerial() {
+      if (!('serial' in navigator)) {
+        alert('お使いのブラウザ（または環境）は Web Serial API に対応していません。ChromeまたはChromebookのChromeブラウザをご利用ください。');
+        return;
+      }
+      try {
+        port = await navigator.serial.requestPort();
+        // Creality A1 Pro / GRBL制御ボード標準ボーレート: 115200
+        await port.open({ baudRate: 115200 });
+
+        const textEncoder = new TextEncoderStream();
+        const writableStreamClosed = textEncoder.readable.pipeTo(port.writable);
+        writer = textEncoder.writable.getWriter();
+
+        document.getElementById('serialStatus').innerText = '接続完了';
+        document.getElementById('serialStatus').style.color = 'green';
+        log('SYSTEM: レーザー加工機にシリアル接続しました (115200 bps)。');
+      } catch (err) {
+        log('ERROR: 接続失敗 - ' + err);
+      }
+    }
+
+    // G-code コマンド送信関数
+    async function sendGcodeLine(command) {
+      if (!writer) {
+        alert('シリアル接続が確立していません。接続ボタンを押してください。');
+        return false;
+      }
+      log('> ' + command);
+      await writer.write(command + '\n');
+      // 機器の応答待ち時間を簡易的に設ける
+      await new Promise(r => setTimeout(r, 50));
+      return true;
+    }
+
+    // --- 生徒用ファイルアップロード ---
+    function submitData() {
+      const fileInput = document.getElementById('svgFile');
+      const file = fileInput.files[0];
+      if (!file) return alert('ファイルを選択してください');
+
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        const payload = {
+          classGroup: document.getElementById('classGroup').value,
+          studentNum: document.getElementById('studentNum').value,
+          studentName: document.getElementById('studentName').value,
+          width: document.getElementById('width').value,
+          height: document.getElementById('height').value,
+          fileData: e.target.result
+        };
+        
+        log('SYSTEM: データを送信中...');
+        google.script.run.withSuccessHandler(res => {
+          alert(res.message);
+          if (res.success) {
+            document.getElementById('uploadForm').reset();
+            loadPendingList();
+          }
+        }).uploadSvg(payload);
+      };
+      reader.readAsDataURL(file);
+    }
+
+    // --- 未加工リスト取得 ---
+    function loadPendingList() {
+      google.script.run.withSuccessHandler(data => {
+        const tbody = document.getElementById('pendingTableBody');
+        tbody.innerHTML = '';
+        if (data.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="4">未加工のデータはありません。</td></tr>';
+          return;
+        }
+        data.forEach(item => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${item.classGroup} ${item.studentNum}番 ${item.studentName}</td>
+            <td>${item.size}</td>
+            <td>${item.fileName}</td>
+            <td>
+              <button class="btn-send" onclick="processAndPrint('${item.fileId}', ${item.rowIndex})">加工開始 (G-code出力)</button>
+            </td>
+          `;
+          tbody.appendChild(tr);
+        });
+      }).getPendingList();
+    }
+
+    // --- SVGデータの取得 ＆ G-code変換 ＆ シリアル送信 ---
+    function processAndPrint(fileId, rowIndex) {
+      if (!writer) {
+        alert('加工を開始する前に、USB接続ボタンを押してレーザー加工機と接続してください。');
+        return;
+      }
+
+      if (!confirm('加工を開始してもよろしいですか？（安全確認を行ってください）')) return;
+
+      log('SYSTEM: GoogleドライブからSVGを取得中...');
+      google.script.run.withSuccessHandler(async res => {
+        if (!res.success) {
+          alert('エラー: ' + res.message);
+          return;
+        }
+
+        const svgText = res.content;
+        const gcodeList = convertSvgToGcode(svgText);
+        
+        log(`SYSTEM: G-code生成完了 (${gcodeList.length} 行)。送信を開始します...`);
+
+        // シリアル送信シーケンス
+        for (let cmd of gcodeList) {
+          await sendGcodeLine(cmd);
+        }
+
+        log('SYSTEM: 送信が完了しました。スプレッドシートのステータスを「完了」に更新します。');
+
+        // 加工完了処理
+        google.script.run.withSuccessHandler(doneRes => {
+          if (doneRes.success) {
+            alert('加工データの送信と「完了」フォルダへの移動が完了しました。');
+            loadPendingList();
+          }
+        }).markFileCompleted(fileId, rowIndex);
+
+      }).getSvgContent(fileId);
+    }
+
+    // --- 簡易 SVG to G-code パース処理 (GRBL標準コマンド生成) ---
+    function convertSvgToGcode(svgString) {
+      const gcode = [];
+      // 初期化設定 (GRBL)
+      gcode.push("G90"); // 絶対座標系
+      gcode.push("G21"); // 単位: mm
+      gcode.push("M5");  // レーザーOFF
+
+      // SVG内の path 要素を抽出し d 属性（移動命令）を解釈する簡易パーサー
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(svgString, "image/svg+xml");
+      const paths = doc.querySelectorAll("path");
+
+      paths.forEach(path => {
+        const d = path.getAttribute("d");
+        if (!d) return;
+
+        // コマンド解析 (M: 移動, L: 直線加工)
+        const commands = d.match(/([a-df-z][^a-df-z]*)/gi);
+        if (!commands) return;
+
+        commands.forEach(cmd => {
+          const type = cmd[0];
+          const args = cmd.slice(1).trim().split(/[\s,]+/).map(Number);
+
+          if (type === 'M' || type === 'm') {
+            // 移動（レーザーOFF）
+            gcode.push("M5");
+            if (args.length >= 2) {
+              gcode.push(`G0 X${args[0].toFixed(3)} Y${args[1].toFixed(3)}`);
+            }
+          } else if (type === 'L' || type === 'l') {
+            // 切削・刻印（レーザーON: S200出力, 移動スピード F1000）
+            gcode.push("M3 S200");
+            if (args.length >= 2) {
+              gcode.push(`G1 X${args[0].toFixed(3)} Y${args[1].toFixed(3)} F1000`);
+            }
+          }
+        });
+        gcode.push("M5"); // パス終了時にオフ
+      });
+
+      // 終了処理
+      gcode.push("M5"); // レーザーOFF
+      gcode.push("G0 X0 Y0"); // 原点復帰
+      return gcode;
+    }
+  </script>
+</body>
+</html>
