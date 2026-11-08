@@ -118,8 +118,8 @@
       await writer.write(command + '\r\n');
 
       // 初期化・設定系コマンドの待機時間
-      if (command === '$X' || command === '$32=1' || command === 'G92 X0 Y0' || command.startsWith('G0')) {
-        await new Promise(r => setTimeout(r, 300));
+      if (command === '$X' || command === '$32=1' || command === '$H' || command.startsWith('G0')) {
+        await new Promise(r => setTimeout(r, 400));
       } else {
         await new Promise(r => setTimeout(r, 50));
       }
@@ -233,16 +233,16 @@
         });
     }
 
-    // --- SVG to G-code パース機能 (レーザーモード強制ON + S500出力版) ---
+    // --- SVG to G-code パース機能 (G92撤去・自動原点復帰 $H 追加版) ---
     function convertSvgToGcode(svgString) {
       const gcode = [];
       
-      // 1. 初期化・安全解除・レーザーモードの強制有効化
+      // 1. 安全解除 ＋ 自動原点復帰 ＋ レーザーモード設定
       gcode.push("$X");         // アラーム解除
-      gcode.push("$32=1");      // レーザーモードON (GRBL仕様)
+      gcode.push("$H");         // 自動原点復帰（Auto Homing）を実行して物理原点を確立
+      gcode.push("$32=1");      // レーザーモードON
       gcode.push("G90");        // 絶対座標モード
       gcode.push("G21");        // 単位: mm
-      gcode.push("G92 X0 Y0");  // 現在位置を原点(0,0)として設定
       gcode.push("M5");         // レーザーOFF
 
       const parser = new DOMParser();
@@ -272,7 +272,7 @@
         gcode.push("M5");
       });
 
-      gcode.push("M5", "G0 X0 Y0");
+      gcode.push("M5", "G0 X0 Y0"); // レーザーOFFにして原点復帰
       return gcode;
     }
   </script>
