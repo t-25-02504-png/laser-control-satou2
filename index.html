@@ -111,15 +111,17 @@
       }
     }
 
-    // G-code送信処理
+ // G-code送信処理
     async function sendGcodeLine(command) {
       if (!writer) return false;
       log('> ' + command);
       await writer.write(command + '\r\n');
 
-      // 初期化・設定系コマンドの待機時間
-      if (command === '$X' || command === '$32=1' || command === '$H' || command.startsWith('G0')) {
-        await new Promise(r => setTimeout(r, 400));
+      // 原点復帰 ($H) の場合は動作完了まで長めに待つ (8秒)
+      if (command === '$H') {
+        await new Promise(r => setTimeout(r, 8000));
+      } else if (command === '$X' || command === '$32=1' || command.startsWith('G0')) {
+        await new Promise(r => setTimeout(r, 500));
       } else {
         await new Promise(r => setTimeout(r, 50));
       }
